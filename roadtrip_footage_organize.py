@@ -31,13 +31,12 @@ def generate_sequence(footage_dir):
 
     premiere_project_path = os.path.abspath(args.premiere_project_path)
     project = pymiere.objects.app.project
-
-    # Create a new premiere project if it doesn't exist yet.
-    if not os.path.exists(premiere_project_path):
-        print("Creating new premiere project for " + premiere_project_path)
-        success = pymiere.objects.app.newProject(premiere_project_path)
-        if not success:
-            sys.exit("Failed creating a new premiere project.")
+    # Create a new premiere project if it doesn't exist yet.    
+    if not os.path.isfile(premiere_project_path):
+      print("Creating new premiere project for " + premiere_project_path)
+      success = pymiere.objects.app.newProject(premiere_project_path)
+      if not success:
+          sys.exit("Failed creating a new premiere project.")
 
     pymiere.objects.app.openDocument(premiere_project_path)
     sequence_preset_path = get_system_sequence_presets(
@@ -67,31 +66,47 @@ def generate_sequence(footage_dir):
         footages = [os.path.join(subfolder, f)
                     for f in os.listdir(subfolder) if f.endswith('.mp4')]
         if (len(footages) == 0):
-            continue
+          continue
+        if (len(footages) == len(project.activeSequence.videoTracks[0].clips)):
+          # All clips have already been imported. continue.
+          continue
 
-        print('footages: ', footages)
-        print("Importing footages under " + subfolder + "...")
+        bin = project.rootItem.createBin(sequence_name)
+        if not bin:
+          # Bin already exists, so find it.
+          for child in project.rootItem.children:
+            if child.name == sequence_name:
+              bin = child
+              break
         # Import the footages into Premiere.
-        success = project.importFiles(
-            footages,
-            suppressUI=True,
-            targetBin=project.getInsertionBin(),
-            importAsNumberedStills=False
-        )
-
-        if not success:
-            sys.exit("Failure importing footages at: " + subfolder)
-
         end_of_last_clip = time_from_seconds(0)
-        for footage in footages:
-            print("Inserting clip for " + subfolder + "...")
-            premiere_footage = project.rootItem.findItemsMatchingMediaPath(
-                footage, ignoreSubclips=False)[0]
+        for i in range(len(footages)):
+          footage = footages[i]
+          if (footage.endswith('jpg') or len(bin.findItemsMatchingMediaPath(
+                footage, ignoreSubclips=False)) > 0):
+            # Footage is an image (don't place in timeline automatically), or already imported.
+            continue
+          
+          success = project.importFiles(
+              [footage],
+              suppressUI=True,
+              targetBin=bin,
+              importAsNumberedStills=False
+          )
 
-            # Add clip to active sequence.
-            project.activeSequence.videoTracks[0].insertClip(
-                premiere_footage, end_of_last_clip)
-            end_of_last_clip = project.activeSequence.videoTracks[0].clips[-1].end.seconds
+          if not success:
+              sys.exit("Failure importing footage at: " + subfolder)
+          
+          print("Inserting clip for " + subfolder + "...")
+          premiere_footage = bin.findItemsMatchingMediaPath(
+              footage, ignoreSubclips=False)[0]
+
+          end_of_last_clip = 0
+          if (i > 0):
+            end_of_last_clip = project.activeSequence.videoTracks[0].clips[i-1].end.seconds
+          # Add clip to active sequence.
+          project.activeSequence.videoTracks[0].insertClip(
+              premiere_footage, end_of_last_clip)
 
     pymiere.objects.app.project.closeDocument()
 
