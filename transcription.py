@@ -94,7 +94,7 @@ def transcribe_using_detection(detection_result_path, transcription_out_path, mo
             **args,
         )['segments']
         for transcription in transcriptions:
-            transcription_results.append({'start': start + float(transcription['start']), 'text': transcription['text'], 'lang': args['language']})
+            transcription_results.append({'start': start + float(transcription['start']), 'end': start + float(transcription['end']), 'text': transcription['text'], 'lang': args['language']})
         
     print("Saving transcription to " + transcription_out_path)
     with open(transcription_out_path, "w+", encoding='UTF-8') as text_file:
@@ -127,7 +127,7 @@ def transcribe_timestamp(model, audio_path, languages, out_path='out/test_transr
             text_file.close()
         return result['segments']
 
-def walk_footage_dir(footage_dir, reprocess=False):
+def walk_footage_dir(footage_dir, reprocess_vad=False, reprocess_lang_detection=False, reprocess_transcription=False):
     vad_model, get_speech_timestamps = create_vad_model()
     
     modeltype = 'medium'
@@ -146,18 +146,18 @@ def walk_footage_dir(footage_dir, reprocess=False):
             
             vad_path = os.path.splitext(footage)[0] + "_" + 'vad' + ".txt"
             pre_transcribe_segments = []
-            if (not os.path.isfile(vad_path) or reprocess):
+            if (not os.path.isfile(vad_path) or reprocess_vad):
                 pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, footage_audio, 0.0, librosa.get_duration(filename=footage_audio), out_path=vad_path)
             else:
                 print("Existing VAD found. Skipping step.")
                 pre_transcribe_segments = [json.loads(f) for f in open(vad_path).readlines()]
             detection_result_path = os.path.splitext(footage)[0] + "_" + 'lang_detection' + ".txt"
-            if (not os.path.isfile(detection_result_path) or reprocess):
+            if (not os.path.isfile(detection_result_path) or reprocess_lang_detection):
                 language_detection_test(detection_result_path, model, footage_audio, pre_transcribe_segments=pre_transcribe_segments)
             else:
                 print("Existing lang detection found. Skipping step.")
             transcription_out_path = os.path.splitext(footage)[0] + "_" + 'transcription' + ".txt"
-            if (not os.path.isfile(transcription_out_path) or reprocess):
+            if (not os.path.isfile(transcription_out_path) or reprocess_transcription):
                 transcribe_using_detection(detection_result_path, transcription_out_path, model, footage_audio)
             else:
                 print("Existing transcription found. Skipping step.")
@@ -279,11 +279,19 @@ def vad_transcribe_timestamps(model, get_speech_timestamps, audio: str, start_ti
 parser = argparse.ArgumentParser(description='Script for organizing footage to folders.')
 parser.add_argument("--footage_dir", help="Root directory for footages.")
 parser.add_argument("--test_single_file", help = "Test transcribing only for a single file.")
-parser.add_argument("--reprocess", action='store_true', help = "Reprocess video even if there are existing intermediate output files.")
+parser.add_argument("--reprocess_vad", action='store_true', help = "Reprocess vad even if there are existing intermediate output files.")
+parser.add_argument("--reprocess_lang_detection", action='store_true', help = "Reprocess language detection even if there are existing intermediate output files.")
+parser.add_argument("--reprocess_transcription", action='store_true', help = "Reprocess transcription even if there are existing intermediate output files.")
+parser.add_argument("--reprocess_all", action='store_true', help = "Reprocess the entire pipeline even if there are existing intermediate output files.")
+
 args = parser.parse_args()
+if args.reprocess_all:
+    args.reprocess_vad = True
+    args.reprocess_lang_detection = True
+    args.reprocess_transcription = True
 
 if args.footage_dir:
-    walk_footage_dir(os.path.abspath(args.footage_dir), reprocess=args.reprocess)
+    walk_footage_dir(os.path.abspath(args.footage_dir), reprocess_vad=args.reprocess_vad, reprocess_lang_detection=args.reprocess_lang_detection, reprocess_transcription=args.reprocess_transcription)
 
 if args.test_single_file:
     filepath = os.path.abspath(args.test_single_file)
