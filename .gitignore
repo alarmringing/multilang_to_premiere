@@ -130,3 +130,6 @@ dmypy.json
 
 # custom
 out/
+
+# translation api key
+google_translation_sa_key.txt
