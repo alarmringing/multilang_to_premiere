@@ -1,17 +1,20 @@
 import os 
 import argparse
 import librosa
+import sys
 import re
 import json
 import torch
-import gc
 import ffmpeg 
 import numpy as np
+from datetime import timedelta
 import whisper
 from typing import Any, Deque, Iterator, List, Dict
 import moviepy.editor as mp
 from whisper.transcribe import detect_language_custom
 from ast import literal_eval
+
+VAD_SEGMENT_PAD = 0.05
 
 def language_detection_test(detection_result_path, model, audio_path, pre_transcribe_segments=None):
     """
@@ -20,7 +23,6 @@ def language_detection_test(detection_result_path, model, audio_path, pre_transc
     print("Detecting language for " + audio_path)
     
     minimum_probability = 0.5
-    pad_between_segments = 0.2
     detection_segment_unit_seconds = 2
     min_detection_segment_unit = 1.5
     audio_total_length_seconds = librosa.get_duration(filename=audio_path)
@@ -29,11 +31,10 @@ def language_detection_test(detection_result_path, model, audio_path, pre_transc
         pre_transcribe_segments = [{'start':0, 'end':audio_total_length_seconds}]
 
     result = []
-    for i in range(len(pre_transcribe_segments)):
-        segment = pre_transcribe_segments[i]
-        start = max(segment['start'] - pad_between_segments, 0.0)
-        #end = segment['end'] if i < len(pre_transcribe_segments) - 1 else audio_total_length_seconds
-        end = min(segment['end'] + pad_between_segments, audio_total_length_seconds)
+    for segment in pre_transcribe_segments:       
+        start = max(segment['start'] - VAD_SEGMENT_PAD, 0.0)
+        end = min(segment['end'] + VAD_SEGMENT_PAD, audio_total_length_seconds)                   
+        
         while start < end:
             duration = detection_segment_unit_seconds
             if (end - (start + duration) < min_detection_segment_unit) or (start + detection_segment_unit_seconds > end):
@@ -61,6 +62,7 @@ def language_detection_test(detection_result_path, model, audio_path, pre_transc
                 duration = result[i+1]['start'] - result[i]['start']
             else:
                 duration = audio_total_length_seconds - result[i]['start']
+            assert(duration > 0)
             result[i]['duration'] = duration
             text_file.write(json.dumps(result[i], ensure_ascii=False) + '\n')
         text_file.close()
@@ -101,6 +103,8 @@ def transcribe_using_detection(detection_result_path, transcription_out_path, mo
         for i in range(len(transcription_results)):
             text_file.write(json.dumps(transcription_results[i], ensure_ascii=False) + '\n')
     text_file.close()
+    
+    return transcription_results
 
 def transcribe_timestamp(model, audio_path, languages, out_path='out/test_transription.txt'):
     for i in range(len(languages)):
@@ -127,40 +131,75 @@ def transcribe_timestamp(model, audio_path, languages, out_path='out/test_transr
             text_file.close()
         return result['segments']
 
-def walk_footage_dir(footage_dir, reprocess_vad=False, reprocess_lang_detection=False, reprocess_transcription=False):
+def transcriptions_to_srt(srt_out_path, transcriptions):
+    srt_segments = []
+    for i in range(len(transcriptions)):
+        segment = transcriptions[i]
+        segment_id = i + 1
+        text = segment['text']
+        
+        # A bit of a hack, but make sure that the end time of this segment is at least 1 milliseconds less than the
+        # beginning of the next segment. Otherwise premiere pro will combine them.
+        if (i != len(transcriptions) - 1 and segment['end'] >= transcriptions[i+1]['start']):
+            segment['end'] = transcriptions[i+1]['start'] - 0.001
+        
+        startTime = str(0)+str(timedelta(seconds=int(segment['start'])))+ ',' + '{0:.3f}'.format(segment['start']).split('.')[1][:3]
+        endTime = str(0)+str(timedelta(seconds=int(segment['end'])))+ ',' + '{0:.3f}'.format(segment['end']).split('.')[1][:3]
+        srt_segments.append(f"{segment_id}\n{startTime} --> {endTime}\n{text[1:] if text[0] == ' ' else text}\n\n")
+    print("Saving srt file of transcription to " + srt_out_path)
+    with open(srt_out_path, "w+", encoding='UTF-8') as srt_file:
+        for srt_segment in srt_segments:
+            srt_file.write(srt_segment)
+    srt_file.close()
+    
+def process_file(file, out_basedir, vad_model, get_speech_timestamps, whisper_model, args):
+    footage_audio = ""
+    if (file.endswith('.mp4')):
+        # First, find if there is already an audio file corresponding to this video.
+        footage_audio = os.path.join(out_basedir, os.path.basename(file).split('.')[0] + ".mp3")
+        if (not os.path.isfile(footage_audio)):
+            print("Extracting audio for " + file)
+            mp.VideoFileClip(file).audio.write_audiofile(footage_audio)
+    elif (file.endswith('.wav') or file.endswith('.mp3')):
+        footage_audio = file
+    else:
+        sys.exit("Input file " + file + " is neither a video or an audio file.")
+    
+    vad_path = os.path.join(out_basedir, os.path.basename(file).split('.')[0] + "_vad.txt")
+    pre_transcribe_segments = []
+    if (not os.path.isfile(vad_path) or args.reprocess_vad):
+        pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, footage_audio, 0.0, librosa.get_duration(filename=footage_audio), out_path=vad_path)
+    else:
+        print("Existing VAD found. Skipping step.")
+        pre_transcribe_segments = [json.loads(f) for f in open(vad_path).readlines()]
+    detection_result_path = os.path.join(out_basedir, os.path.basename(file).split('.')[0] + "_lang_detection.txt")
+    if (not os.path.isfile(detection_result_path) or args.reprocess_lang_detection):
+        language_detection_test(detection_result_path, whisper_model, footage_audio, pre_transcribe_segments=pre_transcribe_segments)
+    else:
+        print("Existing lang detection found. Skipping step.")
+    transcription_out_path = os.path.join(out_basedir, os.path.basename(file).split('.')[0] + "_transcription.txt")
+    if (not os.path.isfile(transcription_out_path) or args.reprocess_transcription):
+        transcriptions = transcribe_using_detection(detection_result_path, transcription_out_path, whisper_model, footage_audio)
+    else:
+        print("Existing transcription found. Skipping step.")
+        transcriptions = [json.loads(f) for f in open(transcription_out_path, encoding='utf-8').readlines()]
+    if (args.output_srt):
+        srt_out_path = os.path.join(out_basedir, os.path.basename(file).split('.')[0] + "_transcription.srt")
+        transcriptions_to_srt(srt_out_path, transcriptions)
+
+def walk_footage_dir(footage_dir, args):
     vad_model, get_speech_timestamps = create_vad_model()
     
     modeltype = 'medium'
     print("Loading langauge model " + modeltype + "...")
-    model = whisper.load_model(modeltype)
+    whisper_model = whisper.load_model(modeltype)
     
     subfolders = [f.path for f in os.scandir(footage_dir) if f.is_dir()]
     for subfolder in subfolders:
         footages = [f.path for f in os.scandir(subfolder) if f.name.endswith('.mp4')]
         for footage in footages:
-            # First, find if there is already an audio file corresponding to this video.
-            footage_audio =  os.path.splitext(footage)[0] + ".mp3"
-            if (not os.path.isfile(footage_audio)):
-                print("Extracting audio for " + footage)
-                mp.VideoFileClip(footage).audio.write_audiofile(footage_audio)
-            
-            vad_path = os.path.splitext(footage)[0] + "_" + 'vad' + ".txt"
-            pre_transcribe_segments = []
-            if (not os.path.isfile(vad_path) or reprocess_vad):
-                pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, footage_audio, 0.0, librosa.get_duration(filename=footage_audio), out_path=vad_path)
-            else:
-                print("Existing VAD found. Skipping step.")
-                pre_transcribe_segments = [json.loads(f) for f in open(vad_path).readlines()]
-            detection_result_path = os.path.splitext(footage)[0] + "_" + 'lang_detection' + ".txt"
-            if (not os.path.isfile(detection_result_path) or reprocess_lang_detection):
-                language_detection_test(detection_result_path, model, footage_audio, pre_transcribe_segments=pre_transcribe_segments)
-            else:
-                print("Existing lang detection found. Skipping step.")
-            transcription_out_path = os.path.splitext(footage)[0] + "_" + 'transcription' + ".txt"
-            if (not os.path.isfile(transcription_out_path) or reprocess_transcription):
-                transcribe_using_detection(detection_result_path, transcription_out_path, model, footage_audio)
-            else:
-                print("Existing transcription found. Skipping step.")
+            process_file(footage, subfolder, vad_model, get_speech_timestamps, whisper_model, args)
+                
 
 # These VAD loading scripts are taken from aadnk/whisper-webui
 
@@ -265,6 +304,15 @@ def vad_transcribe_timestamps(model, get_speech_timestamps, audio: str, start_ti
 
         result.extend(adjusted)
         chunk_start += chunk_duration
+        
+    i = 0
+    while i < len(result):
+        # If the gap between this and the next segment is less than pad_between_segments * 2, just combine them.
+        if (i != len(result) - 1 and result[i+1]['start'] - result[i]['end'] < 2 * VAD_SEGMENT_PAD):
+            result[i]['end'] = result[i+1]['end']
+            del result[i+1] 
+        else:
+            i += 1
 
     if (out_path != None):
         with open(out_path, "w+", encoding='UTF-8') as text_file:
@@ -278,6 +326,7 @@ def vad_transcribe_timestamps(model, get_speech_timestamps, audio: str, start_ti
 #directory paths 
 parser = argparse.ArgumentParser(description='Script for organizing footage to folders.')
 parser.add_argument("--footage_dir", help="Root directory for footages.")
+parser.add_argument("--output_srt", action='store_true', help="Whether to also output the transcription result to an srt format.")
 parser.add_argument("--test_single_file", help = "Test transcribing only for a single file.")
 parser.add_argument("--reprocess_vad", action='store_true', help = "Reprocess vad even if there are existing intermediate output files.")
 parser.add_argument("--reprocess_lang_detection", action='store_true', help = "Reprocess language detection even if there are existing intermediate output files.")
@@ -291,18 +340,26 @@ if args.reprocess_all:
     args.reprocess_transcription = True
 
 if args.footage_dir:
-    walk_footage_dir(os.path.abspath(args.footage_dir), reprocess_vad=args.reprocess_vad, reprocess_lang_detection=args.reprocess_lang_detection, reprocess_transcription=args.reprocess_transcription)
+    walk_footage_dir(os.path.abspath(args.footage_dir), args)
 
 if args.test_single_file:
     filepath = os.path.abspath(args.test_single_file)
     vad_model, get_speech_timestamps = create_vad_model()
-    pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, filepath, 0.0, librosa.get_duration(filename=filepath))
+    #pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, filepath, 0.0, librosa.get_duration(filename=filepath))
     
     modeltype = 'medium'
     print("Loading langauge model " + modeltype + "...")
     
-    model = whisper.load_model(modeltype)
-    detection_result_name = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'lang_detection' + ".txt")
-    language_detection_test(detection_result_name, model, filepath, pre_transcribe_segments = pre_transcribe_segments)
-    transcription_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription' + ".txt")
-    transcribe_using_detection(detection_result_name, transcription_out_path, model, filepath)
+    whisper_model = whisper.load_model(modeltype)
+    
+    process_file(filepath, os.path.abspath('./out'), vad_model, get_speech_timestamps, whisper_model, args)
+    
+    
+    # detection_result_name = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'lang_detection' + ".txt")
+    # #language_detection_test(detection_result_name, model, filepath, pre_transcribe_segments = pre_transcribe_segments)
+    # transcription_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription' + ".txt")
+    # #transcriptions = transcribe_using_detection(detection_result_name, transcription_out_path, model, filepath)
+    # if (args.output_srt):
+    #     transcriptions = [json.loads(f) for f in open(transcription_out_path, encoding='utf-8').readlines()]
+    #     srt_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription_srt' + ".txt")
+    #     transcriptions_to_srt(srt_out_path, transcriptions)
