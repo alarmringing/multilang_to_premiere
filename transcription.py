@@ -14,7 +14,12 @@ import moviepy.editor as mp
 from whisper.transcribe import detect_language_custom
 from ast import literal_eval
 
+# Amount of padding before and after each VAD segment.
 VAD_SEGMENT_PAD = 0.05
+
+# Seconds that a single whisper model can process at a time. THis must match the CHUNK_LENGTH const value
+# in whisper's audio.py
+CHUNK_LENGTH = 30
 
 def language_detection_test(detection_result_path, model, audio_path, pre_transcribe_segments=None):
     """
@@ -31,6 +36,7 @@ def language_detection_test(detection_result_path, model, audio_path, pre_transc
         pre_transcribe_segments = [{'start':0, 'end':audio_total_length_seconds}]
 
     result = []
+    # For each VAD Segment
     for segment in pre_transcribe_segments:       
         start = max(segment['start'] - VAD_SEGMENT_PAD, 0.0)
         end = min(segment['end'] + VAD_SEGMENT_PAD, audio_total_length_seconds)                   
@@ -87,16 +93,20 @@ def transcribe_using_detection(detection_result_path, transcription_out_path, mo
         args['language'] = re.sub(r'\s','',lang_section['lang'])
         if args['language'] == 'nil':
             continue
-        transcriptions = whisper.transcribe(
-            model,
-            str(audio_path),
-            logprob_threshold=-1.0,
-            start_second = start,
-            duration_seconds = duration,
-            **args,
-        )['segments']
-        for transcription in transcriptions:
-            transcription_results.append({'start': start + float(transcription['start']), 'end': start + float(transcription['end']), 'text': transcription['text'], 'lang': args['language']})
+        
+        for i in range(int(duration / CHUNK_LENGTH) + 1):
+            start_subsegment = start + i * CHUNK_LENGTH
+            duration_trimmed = min(duration - i * CHUNK_LENGTH, CHUNK_LENGTH)
+            transcriptions = whisper.transcribe(
+                model,
+                str(audio_path),
+                logprob_threshold=-1.0,
+                start_second = start_subsegment,
+                duration_seconds = duration_trimmed,
+                **args,
+            )['segments']
+            for transcription in transcriptions:
+                transcription_results.append({'start': start_subsegment + float(transcription['start']), 'end': start_subsegment + float(transcription['end']), 'text': transcription['text'], 'lang': args['language']})
         
     print("Saving transcription to " + transcription_out_path)
     with open(transcription_out_path, "w+", encoding='UTF-8') as text_file:
@@ -322,44 +332,44 @@ def vad_transcribe_timestamps(model, get_speech_timestamps, audio: str, start_ti
 
     return result
     
+if __name__ == "__main__":
+    #directory paths 
+    parser = argparse.ArgumentParser(description='Script for organizing footage to folders.')
+    parser.add_argument("--footage_dir", help="Root directory for footages.")
+    parser.add_argument("--output_srt", action='store_true', help="Whether to also output the transcription result to an srt format.")
+    parser.add_argument("--test_single_file", help = "Test transcribing only for a single file.")
+    parser.add_argument("--reprocess_vad", action='store_true', help = "Reprocess vad even if there are existing intermediate output files.")
+    parser.add_argument("--reprocess_lang_detection", action='store_true', help = "Reprocess language detection even if there are existing intermediate output files.")
+    parser.add_argument("--reprocess_transcription", action='store_true', help = "Reprocess transcription even if there are existing intermediate output files.")
+    parser.add_argument("--reprocess_all", action='store_true', help = "Reprocess the entire pipeline even if there are existing intermediate output files.")
 
-#directory paths 
-parser = argparse.ArgumentParser(description='Script for organizing footage to folders.')
-parser.add_argument("--footage_dir", help="Root directory for footages.")
-parser.add_argument("--output_srt", action='store_true', help="Whether to also output the transcription result to an srt format.")
-parser.add_argument("--test_single_file", help = "Test transcribing only for a single file.")
-parser.add_argument("--reprocess_vad", action='store_true', help = "Reprocess vad even if there are existing intermediate output files.")
-parser.add_argument("--reprocess_lang_detection", action='store_true', help = "Reprocess language detection even if there are existing intermediate output files.")
-parser.add_argument("--reprocess_transcription", action='store_true', help = "Reprocess transcription even if there are existing intermediate output files.")
-parser.add_argument("--reprocess_all", action='store_true', help = "Reprocess the entire pipeline even if there are existing intermediate output files.")
+    args = parser.parse_args()
+    if args.reprocess_all:
+        args.reprocess_vad = True
+        args.reprocess_lang_detection = True
+        args.reprocess_transcription = True
 
-args = parser.parse_args()
-if args.reprocess_all:
-    args.reprocess_vad = True
-    args.reprocess_lang_detection = True
-    args.reprocess_transcription = True
+    if args.footage_dir:
+        walk_footage_dir(os.path.abspath(args.footage_dir), args)
 
-if args.footage_dir:
-    walk_footage_dir(os.path.abspath(args.footage_dir), args)
-
-if args.test_single_file:
-    filepath = os.path.abspath(args.test_single_file)
-    vad_model, get_speech_timestamps = create_vad_model()
-    #pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, filepath, 0.0, librosa.get_duration(filename=filepath))
-    
-    modeltype = 'medium'
-    print("Loading langauge model " + modeltype + "...")
-    
-    whisper_model = whisper.load_model(modeltype)
-    
-    process_file(filepath, os.path.abspath('./out'), vad_model, get_speech_timestamps, whisper_model, args)
-    
-    
-    # detection_result_name = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'lang_detection' + ".txt")
-    # #language_detection_test(detection_result_name, model, filepath, pre_transcribe_segments = pre_transcribe_segments)
-    # transcription_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription' + ".txt")
-    # #transcriptions = transcribe_using_detection(detection_result_name, transcription_out_path, model, filepath)
-    # if (args.output_srt):
-    #     transcriptions = [json.loads(f) for f in open(transcription_out_path, encoding='utf-8').readlines()]
-    #     srt_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription_srt' + ".txt")
-    #     transcriptions_to_srt(srt_out_path, transcriptions)
+    if args.test_single_file:
+        filepath = os.path.abspath(args.test_single_file)
+        vad_model, get_speech_timestamps = create_vad_model()
+        #pre_transcribe_segments = vad_transcribe_timestamps(vad_model, get_speech_timestamps, filepath, 0.0, librosa.get_duration(filename=filepath))
+        
+        modeltype = 'medium'
+        print("Loading langauge model " + modeltype + "...")
+        
+        whisper_model = whisper.load_model(modeltype)
+        
+        process_file(filepath, os.path.abspath('./out'), vad_model, get_speech_timestamps, whisper_model, args)
+        
+        
+        # detection_result_name = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'lang_detection' + ".txt")
+        # #language_detection_test(detection_result_name, model, filepath, pre_transcribe_segments = pre_transcribe_segments)
+        # transcription_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription' + ".txt")
+        # #transcriptions = transcribe_using_detection(detection_result_name, transcription_out_path, model, filepath)
+        # if (args.output_srt):
+        #     transcriptions = [json.loads(f) for f in open(transcription_out_path, encoding='utf-8').readlines()]
+        #     srt_out_path = os.path.join(os.path.abspath('./out'),  os.path.basename(filepath).split('.')[0] + "_" + 'transcription_srt' + ".txt")
+        #     transcriptions_to_srt(srt_out_path, transcriptions)
