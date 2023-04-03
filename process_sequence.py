@@ -24,7 +24,7 @@ def add_transcription_to_captions(trackItem, clip_begin_time_in_track, transcrip
         end_in_sequence =  clip_begin_time_in_track + min(trackItem.duration.seconds, segment['end'] - trackItem.inPoint.seconds)
         captions.append({'start': start_in_sequence, 'end': end_in_sequence, 'text': segment['text']})
 
-def process_sequence(sequence, reprocess=False):
+def transcribe_sequence(sequence, reprocess=False):
     srt_outpath = os.path.join(footage_dir, sequence.name, sequence.name + '_multilang_captions.srt')
     
     if os.path.isfile(srt_outpath) and not reprocess:
@@ -36,7 +36,7 @@ def process_sequence(sequence, reprocess=False):
         print("{new_dir} doesn't exist. Creating the directory.")
         os.mkdir(new_dir)
     
-    print("Processing sequence " + sequence.name + "...")
+    print("Transcribing sequence " + sequence.name + "...")
     pymiere.objects.app.project.openSequence(sequenceID=sequence.sequenceID)
     captions = []
     
@@ -59,11 +59,59 @@ def process_sequence(sequence, reprocess=False):
                 break
         clip_begin_time_in_track += clip.duration.seconds
     transcriptions_to_srt(srt_outpath, captions)
+def add_denoised_audio_to_sequence(denoised_dir, sequence):
+    project = pymiere.objects.app.project
+    project.openSequence(sequenceID=sequence.sequenceID)
+    bin = project.rootItem
+    for child in project.rootItem.children:
+        if child.name == "denoised_audio":
+            bin = child
+            break
+    
+    # BEWARE! Denoised audiotrack is set as the last audio track by default. This may overwrite the existing project.
+    denoised_audioTrack = project.activeSequence.audioTracks[-1]
+    denoised_audioTrack.setMute(1.0)
+    
+    # Current position of this clip in this track. Increment after each clip.
+    clip_begin_time_in_track = 0.0
+    for clip in project.activeSequence.audioTracks[0].clips:
+        mediapath = clip.projectItem.getMediaPath()
+        if not os.path.isfile(mediapath):
+            print("Skipping {sequence.name} because path to the clip in track is not a valid path. path: " + mediapath)
+            continue
+        
+        # In the same directory as mediapath, look for a denoised audio file. Assumes .mp3 for now.
+        denoised_audio_filepath = os.path.join(denoised_dir, os.path.basename(mediapath).split('.')[0] + "_denoised_mono.mp3")
+        if not os.path.isfile(denoised_audio_filepath):
+            print("Skipping {mediapath}'s denoised audio file because it doesn't exist.")
+            clip_begin_time_in_track += clip.duration.seconds
+            continue
+        else:
+            if (len(bin.findItemsMatchingMediaPath(denoised_audio_filepath, ignoreSubclips=False)) == 0):
+                success = project.importFiles(
+                        [denoised_audio_filepath],
+                        suppressUI=True,
+                        targetBin=bin,
+                        importAsNumberedStills=False
+                    )
+
+            denoised_audio_item = bin.findItemsMatchingMediaPath(denoised_audio_filepath, ignoreSubclips=False)[0]
+
+            denoised_audioTrack.insertClip(denoised_audio_item, clip_begin_time_in_track)
+
+            # denoised_audioTrack.clips[-1].inPoint = clip.inPoint
+            # denoised_audioTrack.clips[-1].outPoint = clip.outPoint
+            denoised_audioTrack.clips[-1].start = clip.start
+            denoised_audioTrack.clips[-1].end = clip.end
+        
+            clip_begin_time_in_track += clip.duration.seconds
        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Script for organizing footage to folders.')
     parser.add_argument("footage_dir", help="Root directory for footages.")
+    parser.add_argument('--transcribe', action='store_true', help='Use this flag to transcribe a sequence.')
+    parser.add_argument('--add_denoised_audio_dir', help='Set a directory of denoised audio fiels to add denoised audio on a sequence.')
     parser.add_argument('--premiere_project_path',
                         help="Path for premiere project to use. Otherwise, will use the first found one in the footage directory.")
     parser.add_argument('--sequence_name',
@@ -96,8 +144,14 @@ if __name__ == "__main__":
             sys.exit("More than one sequence with the name " + args.sequence_name + " was found.")
 
         sequence = sequences_with_subfolder_name[0]
-        process_sequence(sequence, reprocess=args.reprocess)  
+        if (args.transcribe):
+            transcribe_sequence(sequence, reprocess=args.reprocess)  
+        if (args.add_denoised_audio_dir):
+            add_denoised_audio_to_sequence(args.add_denoised_audio_dir, sequence)
     else:
         # open each sequence and run process_sequence.
         for sequence in pymiere.objects.app.project.sequences:
-            process_sequence(sequence, reprocess=args.reprocess)
+            if (args.transcribe):
+                transcribe_sequence(sequence, reprocess=args.reprocess)
+            if (args.add_denoised_audio_dir):
+                add_denoised_audio_to_sequence(args.add_denoised_audio_dir, sequence)
