@@ -2,8 +2,10 @@ import os
 import sys
 import json
 import argparse
+import pysrt
 import pymiere
 from datetime import timedelta
+from pymiere.wrappers import time_from_seconds
 from transcription import transcriptions_to_srt
 
 def add_transcription_to_captions(trackItem, clip_begin_time_in_track, transcription_path, captions):
@@ -59,6 +61,52 @@ def transcribe_sequence(sequence, reprocess=False):
                 break
         clip_begin_time_in_track += clip.duration.seconds
     transcriptions_to_srt(srt_outpath, captions)
+
+def add_text_graphic_to_sequence(sequence, footage_dir, mgt_dir):    
+    print("Adding graphics for text in sequence " + sequence.name + "...")
+    pymiere.objects.app.project.openSequence(sequenceID=sequence.sequenceID)
+    sequence_dir = os.path.join(footage_dir, sequence.name)
+    languages = ['en', 'ko', 'ja', 'zh']
+    text_track_start_point = len(sequence.videoTracks) - len(languages)
+    
+    for i in range(len(languages)):
+        lang = languages[i]
+        print("lang: ", lang)
+        # Caption .srt file is assumed to be in the directory of sequence's footages, with the format of ($SEQUENCENAME)_multilang_final_($lang).srt
+        srt_path = os.path.join(sequence_dir, sequence.name + '_multilang_final_' + lang + '.srt')
+        if not os.path.isfile(srt_path):
+            print("Skip processing language " + lang + "; can't find the caption file. It should be in the format of ($SEQUENCENAME)_multilang_final_($lang).srt")
+            continue 
+        captions = pysrt.open(srt_path)
+        # Motion graphics template is assumed to be in mgt_dir with the file name as ($lang).mogrt
+        mogrt_path = os.path.join(mgt_dir, lang + '_title.mogrt')
+        if not os.path.isfile(mogrt_path):
+            print("Skip processing language " + lang + "; can't find .mogrt file.")
+            continue 
+        for caption in captions:
+            caption_start_time = caption.start.minutes * 60 + caption.start.seconds + 0.001 * caption.start.milliseconds
+            mgt_clip = sequence.importMGT(  
+                path=mogrt_path,  
+                time=time_from_seconds(caption_start_time),  # start time  
+                videoTrackIndex=text_track_start_point+i, audioTrackIndex=1  # Place this caption on a new track
+            )
+            mgt_clip.end = time_from_seconds(caption.end.minutes * 60 + caption.end.seconds + 0.001 * caption.end.milliseconds)
+            # get component hosting modifiable template properties  
+            mgt_component = mgt_clip.getMGTComponent()  
+            # handle two possible types for mgt
+            if mgt_component is None:
+                # Premiere Pro type, directly use components
+                components = mgt_clip.components
+            else:
+                # After Effects type, everything is hosted by the MGT component
+                components = [mgt_component]
+            for component in components:
+                # iter through MGT properties
+                for prop in component.properties:
+                    #print("property name: ", prop.displayName)
+                    if (prop.displayName == 'Text'):
+                        prop.setValue(caption.text, True)
+    
 def add_denoised_audio_to_sequence(denoised_dir, sequence):
     project = pymiere.objects.app.project
     project.openSequence(sequenceID=sequence.sequenceID)
@@ -112,6 +160,7 @@ if __name__ == "__main__":
     parser.add_argument("footage_dir", help="Root directory for footages.")
     parser.add_argument('--transcribe', action='store_true', help='Use this flag to transcribe a sequence.')
     parser.add_argument('--add_denoised_audio_dir', help='Set a directory of denoised audio fiels to add denoised audio on a sequence.')
+    parser.add_argument('--add_text_with_mgt_dir', help='Add text graphics in 4 languages for a sequence with the mgt file templates in this directory.')
     parser.add_argument('--premiere_project_path',
                         help="Path for premiere project to use. Otherwise, will use the first found one in the footage directory.")
     parser.add_argument('--sequence_name',
@@ -119,6 +168,9 @@ if __name__ == "__main__":
     parser.add_argument('--reprocess', action='store_true', help='Whether to regenerate srt files even if there is already an existing oen for the sequence.')
 
     args = parser.parse_args()
+    
+    if (not (args.transcribe or args.add_denoised_audio_dir or args.add_text_with_mgt_dir)):
+        sys.exit("Must specify --transcribe, --add_denoised_audio, or --add_text_with_mgt_dir flag! Use -h for help.")
 
     footage_dir = os.path.abspath(args.footage_dir)
     premiere_project_path = ""
@@ -148,6 +200,8 @@ if __name__ == "__main__":
             transcribe_sequence(sequence, reprocess=args.reprocess)  
         if (args.add_denoised_audio_dir):
             add_denoised_audio_to_sequence(args.add_denoised_audio_dir, sequence)
+        if (args.add_text_with_mgt_dir):
+            add_text_graphic_to_sequence(sequence, footage_dir, args.add_text_with_mgt_dir)
     else:
         # open each sequence and run process_sequence.
         for sequence in pymiere.objects.app.project.sequences:
