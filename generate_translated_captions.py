@@ -8,6 +8,9 @@ from google.cloud import translate
 from google.cloud.translate_v3.types import translation_service
 from google.oauth2 import service_account
 
+# Maximum amount of lines possible to send in a single translation request.
+MAX_STRING_LIMIT = 1000
+
 def generate_stats(response_from_translate_api, captions):
     language_durations = {'ko':0.0, 'en':0.0, 'zh':0.0, 'ja':0.0}
     total_speech_duration = 0.0
@@ -51,24 +54,23 @@ def translate_captions(srt_path, google_api_key_path, args):
         
     for target_language in translation_target_languages:
         print("Translating " + srt_path + " to " + target_language + "...")
-        response = client.translate_text(
-            contents=[caption.text for caption in captions],
-            target_language_code=target_language,
-            parent=parent,
-        )
-        
-        if(len(response.translations) != len(captions)):
-            sys.exit("Error: length of translated results does not match the length of captions.")
-        
-        if (target_language == translation_target_languages[0] and args.stats):
-            # Generate language statistics if args.stats is on.
-            generate_stats(response, captions)
-            
         translated_captions = []
-        for i in range(len(response.translations)):
-            text = html.unescape(response.translations[i].translated_text)
-            translated_caption = pysrt.SubRipItem(captions[i].index, captions[i].start, captions[i].end, text, captions[i].position)
-            translated_captions.append(translated_caption)
+        for k in range(len(captions) // MAX_STRING_LIMIT + 1):
+            captions_batch = captions[k * MAX_STRING_LIMIT:k * MAX_STRING_LIMIT + min(len(captions) - k * MAX_STRING_LIMIT, MAX_STRING_LIMIT)] 
+            response = client.translate_text(
+                contents=[c.text for c in captions_batch],
+                target_language_code=target_language,
+                parent=parent,
+            )
+            
+            if(len(response.translations) != len(captions_batch)):
+                sys.exit("Error: length of translated results does not match the length of captions.")                
+            
+            for i in range(len(response.translations)):
+                text = html.unescape(response.translations[i].translated_text)
+                this_caption = captions[i + k * MAX_STRING_LIMIT]
+                translated_caption = pysrt.SubRipItem(this_caption.index, this_caption.start, this_caption.end, text, this_caption.position)
+                translated_captions.append(translated_caption)
         
         if target_language == 'zh-CN':
             target_language = 'zn'
@@ -90,7 +92,7 @@ srt_path = os.path.abspath(args.srt_path)
 google_api_key_path = os.path.abspath(args.google_api_key_path)
 
 if (os.path.isfile(srt_path) and srt_path.endswith('.srt') and os.path.isfile(google_api_key_path) and google_api_key_path.endswith('.json')):
-    if ((args.english and args.all)):
+    if ((args.english and args.four_languages)):
         sys.exit("Specify only one of the two flags: --english, or --four_languages.")
     translate_captions(srt_path, google_api_key_path, args)
 else:
