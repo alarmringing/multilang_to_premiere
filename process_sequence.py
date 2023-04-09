@@ -4,9 +4,13 @@ import json
 import argparse
 import pysrt
 import pymiere
+import budoux
 from datetime import timedelta
 from pymiere.wrappers import time_from_seconds
 from transcription import transcriptions_to_srt
+
+MAX_LETTERS_IN_VERTICAL_LINE = 19
+
 
 def add_transcription_to_captions(trackItem, clip_begin_time_in_track, transcription_path, captions):
     transcribe_segments = [json.loads(f) for f in open(transcription_path, encoding='utf-8').readlines()]
@@ -62,6 +66,25 @@ def transcribe_sequence(sequence, reprocess=False):
         clip_begin_time_in_track += clip.duration.seconds
     transcriptions_to_srt(srt_outpath, captions)
 
+def line_break_vertical_text(original_text, lang):
+    # For japanese and chinese, insert natural line breaks.
+    if (lang == 'ja'):
+        parsed_text = budoux.load_default_japanese_parser().parse(original_text)
+            
+    if (lang == 'zh'):
+        parsed_text = budoux.load_default_simplified_chinese_parser().parse(original_text)
+
+    text = ""
+    letters_in_line = 0
+    for segment in parsed_text:
+        letters_in_line += len(segment)
+        if (letters_in_line > MAX_LETTERS_IN_VERTICAL_LINE):
+            text += '\n'
+            letters_in_line = 0
+        text += segment
+        
+    return text
+
 def add_text_graphic_to_sequence(sequence, footage_dir, mogrt_path):    
     print("Adding graphics for text in sequence " + sequence.name + "...")
     pymiere.objects.app.project.openSequence(sequenceID=sequence.sequenceID)
@@ -100,8 +123,15 @@ def add_text_graphic_to_sequence(sequence, footage_dir, mogrt_path):
             for prop in component.properties:
                 # Each property in MGT must be named with the langauge codes matching elements in the array languages.
                 for lang in languages:
+                    text = captions[lang][i].text
+                    
+                    # For japanese, insert natural line breaks.
+                    # TODO(jiheeh): Chinese line breaks are difficult now due to after effects limited support of vertical text.
+                    if (lang == 'ja'):
+                        text = line_break_vertical_text(text, lang)
+
                     if (prop.displayName == lang):
-                        prop.setValue(captions[lang][i].text, True)
+                        prop.setValue(text, True)
     
 def add_denoised_audio_to_sequence(denoised_dir, sequence):
     project = pymiere.objects.app.project
