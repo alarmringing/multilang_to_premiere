@@ -85,17 +85,22 @@ def line_break_vertical_text(original_text, lang):
         
     return text
 
-def add_text_graphic_to_sequence(sequence, footage_dir, mogrt_path):    
+def add_text_graphic_to_sequence(sequence, footage_dir, captions_dir, mogrt_path):    
     print("Adding graphics for text in sequence " + sequence.name + "...")
     pymiere.objects.app.project.openSequence(sequenceID=sequence.sequenceID)
-    sequence_dir = os.path.join(footage_dir, sequence.name)
+    
     languages = ['en', 'ko', 'ja', 'zh']
     captions = {}
     for lang in languages:
-        # Caption .srt file is assumed to be in the directory of sequence's footages, with the format of ($SEQUENCENAME)_multilang_final_($lang).srt
-        srt_path = os.path.join(sequence_dir, sequence.name + '_multilang_final_' + lang + '.srt')
+        # Caption .srt file is assumed to be in the directory of sequence's footages, or in a specified directory,
+        # with the format of ($SEQUENCENAME)_edited_($lang).srt
+        if (captions_dir):
+            srt_path = os.path.join(captions_dir, sequence.name + '_edited_' + lang + '.srt')
+        else:
+            sequence_dir = os.path.join(footage_dir, sequence.name)
+            srt_path = os.path.join(sequence_dir, sequence.name + '_edited_' + lang + '.srt')
         if not os.path.isfile(srt_path):
-            print("Skip processing language " + lang + "; can't find the caption file. It should be in the format of ($SEQUENCENAME)_multilang_final_($lang).srt")
+            print("Skip processing language " + lang + "; can't find the caption file. It should be in the format of ($SEQUENCENAME)_multilang_edited_($lang).srt")
             continue 
         captions[lang] = pysrt.open(srt_path)
         print(lang, "length is ", len(captions[lang]))
@@ -186,17 +191,18 @@ if __name__ == "__main__":
     parser.add_argument("footage_dir", help="Root directory for footages.")
     parser.add_argument('--transcribe', action='store_true', help='Use this flag to transcribe a sequence.')
     parser.add_argument('--add_denoised_audio_dir', help='Set a directory of denoised audio fiels to add denoised audio on a sequence.')
-    parser.add_argument('--mogrt_path', help='Add text graphics in 4 languages for a sequence using this mgt file template.')
+    parser.add_argument('--add_graphics_with_mogrt', help='Add text graphics in 4 languages for a sequence using this mgt file template.')
+    parser.add_argument('--captions_dir', help='Optional directory for captions when generating text graphics.')
     parser.add_argument('--premiere_project_path',
                         help="Path for premiere project to use. Otherwise, will use the first found one in the footage directory.")
     parser.add_argument('--sequence_name',
-                        help="Name of the sequence to generate subtitles for. If not set, script will attempt to generate script for all sequences in the project.")
+                        help="Name of the sequence to process. If not set, script will attempt to generate script for all sequences in the project.")
     parser.add_argument('--reprocess', action='store_true', help='Whether to regenerate srt files even if there is already an existing oen for the sequence.')
 
     args = parser.parse_args()
     
-    if (not (args.transcribe or args.add_denoised_audio_dir or args.mogrt_path)):
-        sys.exit("Must specify --transcribe, --add_denoised_audio, or --mogrt_path flag! Use -h for help.")
+    if (not (args.transcribe or args.add_denoised_audio_dir or args.add_graphics_with_mogrt)):
+        sys.exit("Must specify --transcribe, --add_denoised_audio, or --add_graphics_with_mogrt flag! Use -h for help.")
 
     footage_dir = os.path.abspath(args.footage_dir)
     premiere_project_path = ""
@@ -217,7 +223,7 @@ if __name__ == "__main__":
     if args.sequence_name:
         sequences_with_subfolder_name = [s for s in pymiere.objects.app.project.sequences if s.name == args.sequence_name]
         if len(sequences_with_subfolder_name) == 0:
-            sys.exit("Sequence with " + args.sequence_name + " could not be found.")
+            sys.exit("Sequence with the name " + args.sequence_name + " could not be found.")
         elif len(sequences_with_subfolder_name) > 1:
             sys.exit("More than one sequence with the name " + args.sequence_name + " was found.")
 
@@ -226,10 +232,10 @@ if __name__ == "__main__":
             transcribe_sequence(sequence, reprocess=args.reprocess)  
         if (args.add_denoised_audio_dir):
             add_denoised_audio_to_sequence(args.add_denoised_audio_dir, sequence)
-        if (args.mogrt_path):
-            if not os.path.isfile(os.path.abspath(args.mogrt_path)):
+        if (args.add_graphics_with_mogrt):
+            if not os.path.isfile(os.path.abspath(args.add_graphics_with_mogrt)):
                 sys.exit("Motion graphics template file path is invalid.")
-            add_text_graphic_to_sequence(sequence, footage_dir, args.mogrt_path)
+            add_text_graphic_to_sequence(sequence, footage_dir, args.captions_dir, args.add_graphics_with_mogrt)
     else:
         # open each sequence and run process_sequence.
         for sequence in pymiere.objects.app.project.sequences:
